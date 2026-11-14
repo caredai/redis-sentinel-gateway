@@ -3,10 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
-	"sync"
 	"syscall"
 	"time"
 
@@ -50,20 +50,14 @@ func main() {
 	sentinelAddr := getEnv("SENTINEL_ADDR", "rfs-redis-node:26379")
 	masterName := getEnv("MASTER_NAME", "mymaster")
 	namespace := getEnv("NAMESPACE", getNamespace())
-	pollIntervalStr := getEnv("POLL_INTERVAL", "5")
 	leaseName := getEnv("LEASE_NAME", "redis-failover-lease")
 	portName := getEnv("PORT_NAME", "redis")
 	portNumberStr := getEnv("PORT_NUMBER", "6379")
-	tickIntervalStr := getEnv("TICK_INTERVAL", "5")
+	tickIntervalStr := getEnv("TICK_INTERVAL", "5s")
 	leaderID := os.Getenv("HOSTNAME")
 	password := os.Getenv("REDIS_PASSWORD")
 
-	// Convert pollInterval, tickInterval, and portNumber from string to appropriate types
-	pollInterval, err := time.ParseDuration(pollIntervalStr)
-	if err != nil {
-		panic(fmt.Sprintf("Invalid poll interval: %v", err))
-	}
-
+	// Convert tickInterval and portNumber from string to appropriate types
 	tickInterval, err := time.ParseDuration(tickIntervalStr)
 	if err != nil {
 		panic(fmt.Sprintf("Invalid tick interval: %v", err))
@@ -106,35 +100,56 @@ func main() {
 		},
 	}
 
-	var wg sync.WaitGroup
-	wg.Add(1)
+	// Liveness: fails if we hold the lease but stopped renewing it for longer than the timeout.
+	healthz := leaderelection.NewLeaderHealthzAdaptor(20 * time.Second)
+	go serveHealthz(getEnv("HEALTH_ADDR", ":8080"), healthz)
 
-	go func() {
-		defer wg.Done()
+	// RunOrDie returns as soon as leadership is lost. Keep re-entering the election
+	// until we are asked to shut down, so a transient API/etcd outage can't leave
+	// the process alive but idle (and the Endpoints stale) forever.
+	for ctx.Err() == nil {
 		leaderelection.RunOrDie(ctx, leaderelection.LeaderElectionConfig{
-			Lock:          lock,
-			LeaseDuration: 15 * time.Second,
-			RenewDeadline: 10 * time.Second,
-			RetryPeriod:   2 * time.Second,
+			Lock:            lock,
+			LeaseDuration:   15 * time.Second,
+			RenewDeadline:   10 * time.Second,
+			RetryPeriod:     2 * time.Second,
+			ReleaseOnCancel: true,
+			WatchDog:        healthz,
 			Callbacks: leaderelection.LeaderCallbacks{
 				OnStartedLeading: func(ctx context.Context) {
 					fmt.Println("Became the leader, starting to manage Endpoints")
-					runEndpointUpdater(ctx, clientset, sentinelClient, namespace, serviceName, masterName, portName, int32(portNumber), pollInterval, tickInterval)
+					runEndpointUpdater(ctx, clientset, sentinelClient, namespace, serviceName, masterName, portName, int32(portNumber), tickInterval)
 				},
 				OnStoppedLeading: func() {
 					fmt.Println("Lost leadership, stopping Endpoints management")
 				},
 			},
 		})
-	}()
-
-	<-ctx.Done()
-
-	wg.Wait()
+		if ctx.Err() == nil {
+			fmt.Println("Leader election ended, re-entering election")
+			select {
+			case <-time.After(2 * time.Second):
+			case <-ctx.Done():
+			}
+		}
+	}
 }
 
-func runEndpointUpdater(ctx context.Context, clientset *kubernetes.Clientset, sentinelClient *redis.SentinelClient, namespace, serviceName, masterName, portName string, portNumber int32, pollInterval, tickInterval time.Duration) {
-	var lastMasterIP string
+func serveHealthz(addr string, healthz *leaderelection.HealthzAdaptor) {
+	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		if err := healthz.Check(r); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Write([]byte("ok"))
+	})
+	if err := http.ListenAndServe(addr, nil); err != nil {
+		fmt.Printf("Health server error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func runEndpointUpdater(ctx context.Context, clientset *kubernetes.Clientset, sentinelClient *redis.SentinelClient, namespace, serviceName, masterName, portName string, portNumber int32, tickInterval time.Duration) {
 	ticker := time.NewTicker(tickInterval)
 	defer ticker.Stop()
 
@@ -147,14 +162,22 @@ func runEndpointUpdater(ctx context.Context, clientset *kubernetes.Clientset, se
 				continue
 			}
 
-			if masterIP != lastMasterIP {
-				err = kube.UpdateKubeEndpoint(ctx, clientset, namespace, serviceName, masterIP, portName, portNumber)
-				if err != nil {
-					fmt.Printf("Error updating Kubernetes Endpoint: %v\n", err)
-				} else {
-					fmt.Printf("Updated Kubernetes Endpoint with new master IP: %s\n", masterIP)
-					lastMasterIP = masterIP
-				}
+			// Compare with what is actually in the cluster, not a cached value,
+			// so drift (manual edits, a previous leader's write) is corrected.
+			currentIP, err := kube.GetKubeEndpointIP(ctx, clientset, namespace, serviceName)
+			if err != nil {
+				fmt.Printf("Error reading Kubernetes Endpoint: %v\n", err)
+				continue
+			}
+			if masterIP == currentIP {
+				continue
+			}
+
+			err = kube.UpdateKubeEndpoint(ctx, clientset, namespace, serviceName, masterIP, portName, portNumber)
+			if err != nil {
+				fmt.Printf("Error updating Kubernetes Endpoint: %v\n", err)
+			} else {
+				fmt.Printf("Updated Kubernetes Endpoint with new master IP: %s (was %q)\n", masterIP, currentIP)
 			}
 		case <-ctx.Done():
 			fmt.Println("Stopping endpoint updater")

@@ -50,6 +50,17 @@ spec:
                 name: {{ .Values.env.REDIS_PASSWORD_SECRET_NAME }}
                 key: {{ .Values.env.REDIS_PASSWORD_KEY }}
           {{- end }}
+        ports:
+          - name: health
+            containerPort: 8080
+            protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: health
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          failureThreshold: 3
         resources:
           requests:
             cpu: {{ .Values.resources.requests.cpu }}

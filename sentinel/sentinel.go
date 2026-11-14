@@ -2,7 +2,9 @@ package sentinel
 
 import (
 	"context"
+	"fmt"
 	"net"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -14,9 +16,17 @@ func GetMasterIP(ctx context.Context, sentinel *redis.SentinelClient, masterName
 		return "", err
 	}
 
-	ips, err := net.LookupIP(addr[0])
+	if len(addr) == 0 {
+		return "", fmt.Errorf("sentinel returned no address for master %q", masterName)
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	ips, err := net.DefaultResolver.LookupIP(lookupCtx, "ip4", addr[0])
 	if err != nil {
 		return "", err
+	}
+	if len(ips) == 0 {
+		return "", fmt.Errorf("no IPv4 address for master host %q", addr[0])
 	}
 	return ips[0].String(), nil
 }

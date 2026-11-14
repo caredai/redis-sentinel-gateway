@@ -39,11 +39,11 @@ tolerations: []
 image:
   repository: "promzeus/redis-sentinel-gateway"
   tag: "v1"
-  pullPolicy: "Always"
+  pullPolicy: "IfNotPresent"
 
 imagePullSecrets: {}
   # - name: dockerhub-secret
 
 # Service account name
 serviceAccount:
-  create: ture
+  create: true

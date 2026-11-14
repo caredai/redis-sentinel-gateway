@@ -58,6 +58,23 @@ func CreateKubeService(ctx context.Context, clientset *kubernetes.Clientset, nam
 	return nil
 }
 
+// GetKubeEndpointIP returns the first address currently set on the Endpoints object, or "" if none/not found.
+func GetKubeEndpointIP(ctx context.Context, clientset *kubernetes.Clientset, namespace, endpointName string) (string, error) {
+	ep, err := clientset.CoreV1().Endpoints(namespace).Get(ctx, endpointName, metav1.GetOptions{})
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("failed to get endpoint %s in namespace %s: %w", endpointName, namespace, err)
+	}
+	for _, subset := range ep.Subsets {
+		for _, addr := range subset.Addresses {
+			return addr.IP, nil
+		}
+	}
+	return "", nil
+}
+
 // UpdateKubeEndpoint updates or creates Endpoints in Kubernetes with specified parameters
 func UpdateKubeEndpoint(ctx context.Context, clientset *kubernetes.Clientset, namespace, endpointName, masterIP, portName string, portNumber int32) error {
 	endpoint := &corev1.Endpoints{
