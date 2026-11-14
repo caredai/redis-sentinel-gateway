@@ -37,8 +37,8 @@ tolerations: []
 
 # Image configuration
 image:
-  repository: "promzeus/redis-sentinel-gateway"
-  tag: "v1"
+  repository: "caredai/redis-sentinel-gateway"
+  tag: "v1.1.0"
   pullPolicy: "IfNotPresent"
 
 imagePullSecrets: {}
