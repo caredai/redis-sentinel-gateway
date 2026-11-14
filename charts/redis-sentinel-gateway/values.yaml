@@ -38,7 +38,7 @@ tolerations: []
 # Image configuration
 image:
   repository: "caredai/redis-sentinel-gateway"
-  tag: "v1.1.0"
+  tag: "v1.1.1"
   pullPolicy: "IfNotPresent"
 
 imagePullSecrets: {}

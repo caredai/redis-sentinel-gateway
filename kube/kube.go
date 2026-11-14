@@ -17,6 +17,8 @@ func GetKubernetesClient() (*kubernetes.Clientset, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get in-cluster config: %w", err)
 	}
+	// The updater reads Endpoints every tick; don't log the v1 Endpoints deprecation warning each time.
+	config.WarningHandler = rest.NoWarnings{}
 
 	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
